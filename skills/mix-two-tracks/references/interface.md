@@ -4,60 +4,98 @@
 
 ```bash
 agent-mix analyze A.mp3 [--mixxx-db DB] [--features A.features.json]
-agent-mix plan A.mp3 B.mp3 [--mixxx-db DB] [--features-a FILE] [--features-b FILE] [--bars 8] [--strict]
-agent-mix mix A.mp3 B.mp3 -o OUT.mp3 [the same options]
+agent-mix plan A.mp3 B.mp3 [--mode auto] [--mixxx-db DB] [--features-a FILE] [--features-b FILE] [--bars 8] [--strict]
+agent-mix mix A.mp3 B.mp3 -o OUT.mp3 [the same planning options]
 ```
 
-`plan` and `mix` also accept `--max-rate-change 0.08`. Success returns exit code 0 and JSON on stdout. Handled input, planning, or output failures return exit code 2 and `{"error":"..."}` on stderr. Planning does not render audio. Mixing writes an MP3 and an adjacent sidecar. Existing output or report files cause failure.
+Modes are `auto` (default), `transition`, `layering`, `mashup`, and `double_drop`. Planning and mixing also accept `--max-rate-change 0.08`. Explicit modes fail if their requirements are unmet; auto can select another eligible mode. See [mixing-modes.md](mixing-modes.md) for eligibility and scoring.
+
+Success returns exit code 0 and JSON on stdout. Handled input, planning, or output errors return exit code 2 and `{"error":"..."}` on stderr. Planning does not render audio. Mixing writes an MP3 and an adjacent sidecar; existing output or report files cause failure.
 
 ## Analysis object
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | 1. |
-| `path`, `audio_sha256` | Local input path and SHA-256 of the encoded input file. |
+| `schema_version` | 2. |
+| `path`, `audio_sha256` | Local input path and SHA-256 of the original encoded file. |
 | `duration_s`, `bpm` | Decoded duration and estimated or native Mixxx BPM. |
-| `beat_timestamps`, `downbeats` | Strictly increasing timestamp arrays in original audio seconds. |
-| `energy_curve` | `times_s`, `values`, and `unit=dBFS_rms`. |
-| `low_frequency_energy` | The same curve structure; relative 20-180 Hz energy normalized to P95, in 0-1. This is not absolute sound pressure. |
-| `key` | `tonic` ranges from C=0 to B=11; `mode` is `major/minor`. `confidence` is a correlation score or null, not a calibrated probability. The entire object may be null. |
-| `vocal_activity` | Null or `{times_s, values}`, with externally supplied 0-1 vocal activity values. |
-| `section_boundaries` | Boundary times in original audio seconds, without semantic labels. |
-| `sources` | Per-feature provenance distinguishing mixxx, librosa, estimated, external, and unknown. |
+| `beat_timestamps`, `downbeats` | Increasing timestamps in original source-audio seconds. |
+| `energy_curve` | `times_s`, `values`, and `unit=dBFS_rms`; approximately 0.5-second bins. |
+| `low_frequency_energy` | The same curve structure; relative 20-180 Hz energy normalized to each track's P95, in 0-1. |
+| `key` | `tonic` from C=0 to B=11 and `mode=major/minor`; `confidence` is correlation or null, not a calibrated probability. The object may be null. |
+| `vocal_activity` | Null or `{times_s, values}` with externally supplied 0-1 activity. |
+| `section_boundaries` | Candidate boundary times, without semantic verse/chorus labels. |
+| `drops` | List of `{time_s, confidence, source}`. Source is `external` or `energy_bass_rise_estimate`. An empty list means no usable markers. |
+| `sources` | Per-feature provenance including mixxx, librosa, estimated, external, and unknown. |
 
-Energy curves have approximately one point every 0.5 seconds. Arrays use the decoded audio timeline, excluding MP3 encoder-delay metadata; FFmpeg handles gapless decoding. Convert native Mixxx positions with `frame_position / native_samplerate`. Do not divide by channel count or substitute the analysis resampling rate for the original sample rate.
+The timeline excludes MP3 encoder-delay metadata; FFmpeg handles gapless decoding. Convert native Mixxx positions with `frame_position / native_samplerate`, without dividing by channel count or substituting the analysis sample rate.
+
+Drop confidence is a heuristic score. External markers receive 1.0 by caller assertion, which does not independently establish accuracy. Estimates are recalculated when external downbeats change unless external drops are supplied.
 
 ## Plan object
 
-Key fields are `target_bpm`, `rate_a=1`, `rate_b`, `exit_a_s`, `entry_b_s`, `overlap_s`, `bars`, `requested_bars`, and `expected_duration_s`. `rate_b=target_bpm/BPM_B`; values above 1 speed B up. B's entry is in original source time. Its overlap window spans `overlap_s * rate_b` seconds in the original B audio.
+Plans use schema version 2 and include:
 
-`score_components` contains energy difference, bass and vocal collisions, and maximum beat-alignment error. Vocal collision is null when vocal activity is unknown. Review `warnings`. The planner uses a global track key and does not model local key changes.
+- `requested_mode`, `mode`: Requested and selected styles.
+- `target_bpm`, `rate_a=1`, `rate_b`: `rate_b=target_bpm/BPM_B`; values above 1 speed B up while retaining pitch.
+- `exit_a_s`, `entry_b_s`: Start of the arrangement in each original source, even when A continues playing throughout a layer.
+- `overlap_s`, `bars`, `requested_bars`: Rendered arrangement duration and effective/requested total bar counts. The count includes entry and exit ramps, plus any buildup and hold.
+- `expected_duration_s`: `exit_a_s + (duration_B-entry_b_s)/rate_b`.
+- `roles`: `vocal_foreground` is `a`, `b`, or null; `bass_owner` is `a` or `b` during a sustained region, or `handoff` for a transition.
+- `anchors`: Null except for double drop. Contains `drop_a_s`, `drop_b_s`, `drop_output_s`, `overlap_offset_s`, `source_a`, and `source_b`.
+- `automation`: Gain law, crossover frequencies, and executable keyframes.
+- `score`, `score_components`: Cost, musical metrics, alignment error, and weighted cost terms. Lower is preferred; scores are not quality probabilities.
+- `selection`: Human-readable reason, the best ranked alternative for each eligible mode, and evaluation counts/unavailable reasons. Explicit requests evaluate only the requested mode.
+- `warnings`, `trim`: Uncertainty and source-trimming disclosure.
+
+B's original overlap window lasts `overlap_s * rate_b`. Double-drop anchors share output time `exit_a_s + (drop_B-entry_b_s)/rate_b`, equal to the A drop's output time.
+
+### Automation
+
+`automation` contains `gain_law=mixxx_constant_power_default`, `bass_hz=180`, `mid_high_hz=3500`, and ordered `keyframes`. Each frame contains:
+
+```json
+{
+  "time_s": 4.0,
+  "mix": 0.5,
+  "level": 1.0,
+  "bass_a": 0.0,
+  "bass_b": 1.0,
+  "mid_a": 1.0,
+  "mid_b": 1.0
+}
+```
+
+Times are relative to the overlap, starting at zero and ending at `overlap_s`. Values are linearly interpolated. `mix` drives the normalized Mixxx fader; `level` controls overall gain; bass/mid fields multiply their respective track bands. All values are finite and in 0-1. Bass coefficients sum to at most 1. The first and final frames must join unmodified A and B. The renderer validates these conditions before decoding audio.
+
+Plans from version 0.1 do not contain this automation. Regenerate those plans with version 0.2 rather than supplying them to the new renderer.
 
 ## Mix result
 
-The result contains `output`, `report`, `audio_sha256`, `plan`, `analysis={a,b}`, and `validation`. The complete object is saved to `OUT.mp3.json`. CLI stdout contains only output, report, plan, and validation to avoid printing all feature curves.
+The result contains `output`, `report`, `audio_sha256`, `plan`, `analysis={a,b}`, and `validation`, with schema version 2. The complete object is saved to `OUT.mp3.json`; CLI stdout omits the long analysis curves.
 
-`validation` includes duration, sample rate, channel count, MP3 codec, decoded sample peak, clipped sample count, and per-track RMS gain. The decoded sample-peak ceiling is -1 dBFS and duration tolerance is 150 ms. These checks do not measure intersample true peak, subjective quality, LUFS, or vocal-detection accuracy.
+Validation includes duration, sample rate, channel count, codec, decoded sample peak, clipped sample count, and per-track RMS gain. Decoded sample peak must be <=-1 dBFS and duration must match the plan within 150 ms. These checks do not measure intersample true peak, subjective quality, LUFS, or annotation accuracy.
 
 ## External feature sidecars
 
-Use `analyze` to obtain the original file hash. Bind external-model or manually verified results to that hash. Only these fields are accepted; each feature field is optional:
+Obtain the original file hash with `analyze`. Bind external-model or manually verified results to it. Only the following fields are accepted; each feature field is optional:
 
 ```json
 {
   "audio_sha256": "full SHA-256 of the original MP3 file",
   "downbeats": [0.0, 2.0, 4.0, 6.0],
   "vocal_activity": {"times_s": [0.0, 0.5, 1.0], "values": [0.0, 0.8, 0.9]},
-  "section_boundaries": [0.0, 16.0, 32.0]
+  "section_boundaries": [0.0, 16.0, 32.0],
+  "drops": [32.0]
 }
 ```
 
-This example illustrates structure only. Actual vocal curves must cover the entire track: the first point must be at most 0.5 s, the final point at least duration minus 1.5 s, and adjacent gaps at most 2 s. Supply the complete curve rather than the three example points. Downbeats must identify consecutive 4/4 bar starts, include at least two points, and agree with the underlying beat timestamps within 80 ms. All times must be finite, increasing, and in `[0,duration)`; do not include an endpoint exactly equal to duration.
+This illustrates structure only. Actual vocal curves must cover the full track: first point <=0.5 s, last point >=duration minus 1.5 s, and gaps <=2 s. Supply the complete curve. Downbeats must identify consecutive 4/4 bar starts, contain at least two points, and match the base beat sequence within 80 ms. Drops must match the selected downbeats within 80 ms. An explicit `drops: []` disables estimated drops for that source. All times must increase, be finite, and lie in `[0,duration)`.
 
 ```bash
-agent-mix mix A.mp3 B.mp3 -o verified.mp3 \
+agent-mix mix A.mp3 B.mp3 -o dropped.mp3 --mode double_drop \
   --mixxx-db /path/to/mixxxdb.sqlite \
   --features-a A.features.json --features-b B.features.json --strict
 ```
 
-The caller supplies and verifies external curves. The program validates their format, hash, and basic consistency, not the external model's accuracy. Strict mode enforces sources and planning rules; it does not guarantee listening quality.
+The caller verifies external annotations. The program checks format, hash, and basic consistency, not model accuracy. Strict mode enforces annotation sources and musical rules, without guaranteeing listening quality.

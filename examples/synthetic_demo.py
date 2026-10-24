@@ -12,6 +12,7 @@ import soundfile as sf
 
 from mixxx_agent_mix import mix
 from mixxx_agent_mix.audio import SAMPLE_RATE, run_ffmpeg
+from mixxx_agent_mix.planner import MODES
 
 
 def synthesize(output, bpm, seconds=40):
@@ -38,6 +39,7 @@ def synthesize(output, bpm, seconds=40):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--mode", choices=("auto", *MODES), default="auto")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     a, b = args.directory / "a.mp3", args.directory / "b.mp3"
@@ -45,6 +47,7 @@ if __name__ == "__main__":
         raise SystemExit("Choose an empty demo directory")
     synthesize(a, 120)
     synthesize(b, 124)
-    result = mix(a, b, args.directory / "mixed.mp3")
+    result = mix(a, b, args.directory / "mixed.mp3", mode=args.mode)
+    print(result["plan"]["mode"], result["plan"]["selection"]["reason"])
     print(result["output"])
     print(result["report"])

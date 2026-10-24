@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "automix-skill"
-version = "0.1.0"
-description = "Mixxx-aware, inspectable two-track MP3 mixing for coding agents"
+version = "0.2.0"
+description = "Automatic transitions, layering, mashups and double drops for coding agents"
 requires-python = ">=3.10"
 license = {text = "GPL-2.0-or-later"}
 dependencies = [

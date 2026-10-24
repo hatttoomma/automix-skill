@@ -11,8 +11,9 @@ License: GNU General Public License, version 2 or (at your option) any later ver
 
 - `src/mixxx_agent_mix/render.py::crossfade_gains` is a Python adaptation and
   specialization of `src/engine/enginexfader.cpp::EngineXfader::getXfadeGains`
-  for default transform=1, CONSTPWR, reverse=false. Bass swapping, file handling
-  and output verification are additions.
+  for default transform=1, CONSTPWR, reverse=false. Mode selection, gain/EQ
+  automation, sustained layering, full-mix mashups, synchronized double drops,
+  file handling and output verification are additions.
 - `src/mixxx_agent_mix/mixxx_db.py` reads the serialization contract in
   `src/proto/beats.proto`, `src/track/beats.cpp`, `src/proto/keys.proto` and
   the database association in `src/library/dao/trackdao.cpp`.

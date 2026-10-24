@@ -1,4 +1,4 @@
 interface:
-  display_name: "Mix Two Tracks"
-  short_description: "Analyze, plan and render a Mixxx-aware two-track MP3 mix"
-  default_prompt: "Use $mix-two-tracks to mix two local MP3 files and explain the selected transition."
+  display_name: "AutoMix Two Tracks"
+  short_description: "Choose transitions, layers, mashups and synchronized double drops"
+  default_prompt: "Use $mix-two-tracks to choose and render the best mixing style for two local MP3s and explain the arrangement."

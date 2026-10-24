@@ -3,10 +3,11 @@ import json
 import sys
 
 from .api import analyze, mix, plan
+from .planner import MODES
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Mixxx-aware offline 2 MP3 -> 1 MP3")
+    parser = argparse.ArgumentParser(description="Auto-select and render a two-track MP3 arrangement")
     commands = parser.add_subparsers(dest="command", required=True)
     analysis = commands.add_parser("analyze", help="Print one track's features as JSON")
     analysis.add_argument("track")
@@ -19,6 +20,7 @@ def main(argv=None):
         command.add_argument("--mixxx-db")
         command.add_argument("--features-a")
         command.add_argument("--features-b")
+        command.add_argument("--mode", choices=("auto", *MODES), default="auto")
         command.add_argument("--bars", type=int, choices=(4, 8, 16, 32), default=8)
         command.add_argument("--max-rate-change", type=float, default=0.08)
         command.add_argument("--strict", action="store_true")
@@ -29,7 +31,7 @@ def main(argv=None):
         if args.command == "analyze":
             result = analyze(args.track, mixxx_db=args.mixxx_db, features=args.features)
         else:
-            settings = {"bars": args.bars, "strict": args.strict,
+            settings = {"mode": args.mode, "bars": args.bars, "strict": args.strict,
                         "max_rate_change": args.max_rate_change}
             if args.command == "mix":
                 result = mix(args.track_a, args.track_b, args.output, mixxx_db=args.mixxx_db,

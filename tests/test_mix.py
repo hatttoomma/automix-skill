@@ -95,6 +95,7 @@ def test_vocal_overlap_rejected(analyses):
     a, b = copy.deepcopy(analyses)
     for track in (a, b):
         track["sources"]["downbeats"] = "external"
+        track["sources"]["vocal_activity"] = "external"
         track["vocal_activity"] = {"times_s": [0, 39.5], "values": [1, 1]}
     with pytest.raises(ValueError, match="low-vocal"):
         plan(a, b, strict=True)

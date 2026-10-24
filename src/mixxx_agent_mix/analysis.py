@@ -47,6 +47,33 @@ def _check_times(values, duration, name, minimum=1):
     return values.tolist()
 
 
+def estimate_drops(track):
+    """Label strong downbeat energy/bass rises; scores are heuristics, not probabilities."""
+    curve, bass = track["energy_curve"], track["low_frequency_energy"]
+    times, energy = np.asarray(curve["times_s"]), np.asarray(curve["values"])
+    low = np.interp(times, bass["times_s"], bass["values"])
+    bar = 240 / track["bpm"]
+    candidates = []
+    for time in track["downbeats"]:
+        if time < 2 * bar or time + bar >= track["duration_s"]:
+            continue
+        before = (times >= time - 2 * bar) & (times < time - 0.25)
+        after = (times >= time) & (times < time + bar)
+        if not np.any(before) or not np.any(after):
+            continue
+        rise = float(np.median(energy[after]) - np.median(energy[before]))
+        bass_rise = float(np.mean(low[after]) - np.mean(low[before]))
+        if rise >= 4.5 and bass_rise >= 0.08:
+            candidates.append({"time_s": float(time),
+                "confidence": float(min(0.95, 0.45 + rise / 30 + bass_rise * 0.5)),
+                "source": "energy_bass_rise_estimate"})
+    accepted = []
+    for candidate in sorted(candidates, key=lambda c: -c["confidence"]):
+        if all(abs(candidate["time_s"] - c["time_s"]) >= 4 * bar for c in accepted):
+            accepted.append(candidate)
+    return sorted(accepted, key=lambda c: c["time_s"])
+
+
 def apply_features(analysis, feature_file):
     """Optional trusted detector/manual results, bound to the original encoded file."""
     with open(feature_file, encoding="utf-8") as handle:
@@ -55,7 +82,7 @@ def apply_features(analysis, feature_file):
         raise ValueError("Feature sidecar must be a JSON object")
     if features.get("audio_sha256") != analysis["audio_sha256"]:
         raise ValueError("Feature sidecar audio_sha256 does not match input")
-    allowed = {"audio_sha256", "downbeats", "vocal_activity", "section_boundaries"}
+    allowed = {"audio_sha256", "downbeats", "vocal_activity", "section_boundaries", "drops"}
     if set(features) - allowed:
         raise ValueError("Unknown feature sidecar fields: " + str(set(features) - allowed))
     duration = analysis["duration_s"]
@@ -85,6 +112,16 @@ def apply_features(analysis, feature_file):
             raise ValueError("Vocal curve must cover the entire track with <=2s gaps")
         analysis["vocal_activity"] = {"times_s": times, "values": values.tolist()}
         analysis["sources"]["vocal_activity"] = "external"
+    if "drops" in features:
+        drops = _check_times(features["drops"], duration, "drops", 0)
+        downbeats = np.asarray(analysis["downbeats"])
+        if any(np.min(np.abs(downbeats - t)) > 0.08 for t in drops):
+            raise ValueError("Drops must agree with downbeats within 80ms")
+        analysis["drops"] = [{"time_s": t, "confidence": 1.0, "source": "external"} for t in drops]
+        analysis["sources"]["drops"] = "external"
+    elif analysis["sources"].get("drops") != "external":
+        analysis["drops"] = estimate_drops(analysis)
+        analysis["sources"]["drops"] = "energy_bass_rise_estimate"
     return analysis
 
 
@@ -137,7 +174,7 @@ def analyze_track(path, *, mixxx_db=None, features=None):
                          for p in peaks})
     estimated_key = native["key"] if native and native["key"] else _key(chroma)
     analysis = {
-        "schema_version": 1, "path": str(path), "audio_sha256": sha256(path),
+        "schema_version": 2, "path": str(path), "audio_sha256": sha256(path),
         "duration_s": duration, "bpm": float(bpm), "beat_timestamps": beats.tolist(),
         "downbeats": downbeats.tolist(),
         "energy_curve": {"times_s": curve_times.tolist(), "values": energy.tolist(), "unit": "dBFS_rms"},
@@ -151,4 +188,6 @@ def analyze_track(path, *, mixxx_db=None, features=None):
                     "key": "mixxx" if native and native["key"] else "chroma_profile_estimate",
                     "vocal_activity": "unknown", "section_boundaries": "novelty_estimate"},
     }
+    analysis["drops"] = estimate_drops(analysis)
+    analysis["sources"]["drops"] = "energy_bass_rise_estimate"
     return apply_features(analysis, features) if features else analysis

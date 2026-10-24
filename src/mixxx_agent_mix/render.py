@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 
 import numpy as np
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, sosfiltfilt
 import soundfile as sf
 
 from .analysis import sha256
@@ -33,12 +33,65 @@ def _normalize(audio):
     return audio * gain, 20 * np.log10(gain)
 
 
-def _smoothstep(t, lo, hi):
-    x = np.clip((t - lo) / (hi - lo), 0, 1)
-    return x * x * (3 - 2 * x)
+def validate_automation(transition, sample_rate=SAMPLE_RATE):
+    automation = transition.get("automation", {})
+    if automation.get("gain_law") != "mixxx_constant_power_default":
+        raise ValueError("Plan needs supported schema-2 gain/EQ automation")
+    frames = automation.get("keyframes", [])
+    if len(frames) < 2:
+        raise ValueError("Automation requires at least two keyframes")
+    times = np.array([f["time_s"] for f in frames], dtype=float)
+    duration = transition["overlap_s"]
+    if not np.isfinite(duration) or duration <= 0:
+        raise ValueError("Automation duration must be positive and finite")
+    if (not np.isfinite(times).all() or abs(times[0]) > 1e-9 or
+            abs(times[-1] - duration) > 1e-6 or np.any(np.diff(times) <= 0)):
+        raise ValueError("Automation times must increase from 0 to overlap duration")
+    for field in ("mix", "level", "bass_a", "bass_b", "mid_a", "mid_b"):
+        values = np.array([f[field] for f in frames], dtype=float)
+        if not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
+            raise ValueError(f"Automation {field} must be finite and in [0,1]")
+    if any(f["bass_a"] + f["bass_b"] > 1.000001 for f in frames):
+        raise ValueError("Automation cannot stack two full bass bands")
+    if (frames[0]["mix"] != 0 or frames[-1]["mix"] != 1 or
+            frames[0]["bass_a"] != 1 or frames[-1]["bass_b"] != 1 or
+            frames[0]["mid_a"] != 1 or frames[-1]["mid_b"] != 1 or
+            frames[0]["level"] != 1 or frames[-1]["level"] != 1):
+        raise ValueError("Automation must join unmodified A and B at the endpoints")
+    if not 0 < automation["bass_hz"] < automation["mid_high_hz"] < sample_rate / 2:
+        raise ValueError("Invalid automation crossover frequencies")
+    return automation
+
+
+def render_overlap(context_a, segment_b, transition, *, sample_rate=SAMPLE_RATE):
+    """Execute the complete overlap timeline, including sustained layers and EQ roles."""
+    automation = validate_automation(transition, sample_rate)
+    n = round(transition["overlap_s"] * sample_rate)
+    if len(context_a) < n or len(segment_b) < n:
+        raise ValueError("Audio is shorter than automation duration")
+    frames = automation["keyframes"]
+    times = np.arange(n) / sample_rate
+    def envelope(field):
+        return np.interp(times, [f["time_s"] for f in frames],
+                         [f[field] for f in frames]).astype(np.float32)
+    ga, gb = crossfade_gains(envelope("mix"))
+    # Offline zero-phase filters avoid phase drift and give effective bass cuts.
+    # The three complementary bands still sum exactly to the original source.
+    def bands(audio):
+        low = sosfiltfilt(butter(2, automation["bass_hz"], fs=sample_rate, output="sos"),
+                      audio, axis=0).astype(np.float32)
+        upper = sosfiltfilt(butter(2, automation["mid_high_hz"], fs=sample_rate, output="sos"),
+                        audio, axis=0).astype(np.float32)
+        return low, upper - low, audio - upper
+    low_a, mid_a, high_a = [band[-n:] for band in bands(context_a)]
+    low_b, mid_b, high_b = bands(segment_b[:n])
+    a = low_a * envelope("bass_a")[:, None] + mid_a * envelope("mid_a")[:, None] + high_a
+    b = low_b * envelope("bass_b")[:, None] + mid_b * envelope("mid_b")[:, None] + high_b
+    return (a * ga[:, None] + b * gb[:, None]) * envelope("level")[:, None]
 
 
 def render(a, b, transition, output):
+    validate_automation(transition)
     output = Path(output).expanduser().resolve()
     report_path = output.with_suffix(output.suffix + ".json")
     if output.suffix.lower() != ".mp3":
@@ -55,16 +108,8 @@ def render(a, b, transition, output):
     start = round(transition["exit_a_s"] * SAMPLE_RATE)
     if start + n > len(audio_a) or n > len(audio_b):
         raise ValueError("Decoded audio is shorter than transition plan")
-    t = np.linspace(0, 1, n, dtype=np.float32)
-    ga, gb = crossfade_gains(t)
-    lowpass = butter(2, transition["bass_swap_hz"], fs=SAMPLE_RATE, output="sos")
-    # Filter with A's preceding context so the low band is settled at fade start.
-    low_a = sosfilt(lowpass, audio_a[:start + n], axis=0)[start:].astype(np.float32)
-    low_b = sosfilt(lowpass, audio_b[:n], axis=0).astype(np.float32)
-    swap = _smoothstep(t, 0.4, 0.6)[:, None]
-    segment_a, segment_b = audio_a[start:start + n], audio_b[:n]
-    blend = ga[:, None] * (segment_a - low_a + low_a * (1 - swap))
-    blend += gb[:, None] * (segment_b - low_b + low_b * swap)
+    # One second of filter context is sufficient for the 180 Hz two-pole filter.
+    blend = render_overlap(audio_a[max(0, start - SAMPLE_RATE):start + n], audio_b[:n], transition)
     audio = np.concatenate((audio_a[:start], blend, audio_b[n:]))
     del audio_a, audio_b, blend
     # 10 ms endpoint fades; never shorten or move the beat-aligned transition.
@@ -92,7 +137,7 @@ def render(a, b, transition, output):
         if abs(duration - transition["expected_duration_s"]) > 0.15:
             raise ValueError("Encoded duration differs from transition plan by >150ms")
         result = {
-            "schema_version": 1, "output": str(output), "report": str(report_path),
+            "schema_version": 2, "output": str(output), "report": str(report_path),
             "audio_sha256": sha256(encoded), "plan": transition,
             "analysis": {"a": a, "b": b},
             "validation": {"duration_s": duration, "sample_rate": SAMPLE_RATE, "channels": 2,
