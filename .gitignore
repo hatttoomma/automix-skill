@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.DS_Store
+*.mp3
+*.wav
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
